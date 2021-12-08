@@ -180,6 +180,24 @@ class TaskLogger(object):
 
     def _after_undo(self, task, output):
         """Task that should follow an undo."""
+
+        # Re-instate cluster labels in table views
+        if output.description and output.description.startswith('metadata_'):
+            which = output.metadata_changed
+            cid = set(self._get_clusters(which))
+            prop = output.description.replace('metadata_', '')
+
+            # Sort changed clusters by their previous metadata value
+            groups = dict()
+            for c in cid:
+                g = self.supervisor.cluster_meta.get(prop, c)
+                groups.setdefault(g, [])
+                groups[g].append(c)
+
+            # Re-instate each group of metadata values
+            for g, c in groups.items():
+                self.supervisor._cluster_metadata_changed(prop, c, g)
+
         last_action = self.last_task(name_not_in=('select', 'next', 'previous', 'undo', 'redo'))
         self._select_state(self.last_state(last_action))
 
