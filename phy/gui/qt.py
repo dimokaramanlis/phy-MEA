@@ -23,6 +23,25 @@ logger = logging.getLogger(__name__)
 
 
 # -----------------------------------------------------------------------------
+# QtWebEngine rendering fix
+# -----------------------------------------------------------------------------
+
+# The cluster view and the similarity view are HTML tables rendered by
+# QtWebEngine (Chromium), living in the same application as the OpenGL plot
+# views. On Windows, GPU compositing of these WebEngine surfaces inside the dock
+# widgets can leave stale black or white patches: the underlying DOM keeps
+# working (rows can still be selected) but the painted surface is corrupted.
+# Forcing software rendering for QtWebEngine sidesteps the buggy GPU path. The
+# tables are lightweight HTML, so there is no perceptible performance cost, and
+# the OpenGL plot views are unaffected (they do not go through Chromium).
+#
+# This must run before QtWebEngine is imported/initialized, and we leave any
+# flags the user already provided untouched.
+if sys.platform.startswith('win') and 'QTWEBENGINE_CHROMIUM_FLAGS' not in os.environ:
+    os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = '--disable-gpu'
+
+
+# -----------------------------------------------------------------------------
 # PyQt import
 # -----------------------------------------------------------------------------
 
@@ -103,6 +122,14 @@ def create_app():
     global QT_APP
     QT_APP = QApplication.instance()
     if QT_APP is None:  # pragma: no cover
+        # QtWebEngine (cluster/similarity tables) and the OpenGL plot views share
+        # a single application. Qt requires this attribute to be set *before* the
+        # QApplication is constructed so that the WebEngine and OpenGL contexts can
+        # be shared; otherwise the WebEngine views can render incorrectly (black or
+        # white patches). This complements the QTWEBENGINE_CHROMIUM_FLAGS workaround
+        # set at import time, and is the officially recommended setting for any app
+        # mixing QtWebEngine with QOpenGLWidget/QOpenGLWindow.
+        QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
         QT_APP = QApplication(sys.argv)
     return QT_APP
 
