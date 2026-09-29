@@ -28,6 +28,39 @@ logger = logging.getLogger(__name__)
 # Manual clustering view
 # -----------------------------------------------------------------------------
 
+def _unconnect_objects(*objects):
+    """Remove all event callbacks tied to some objects (e.g. a closed view and its canvas):
+    callbacks whose sender is one of the objects, and callbacks that are methods of, or
+    closures directly referring to, one of the objects.
+
+    Otherwise, a closed view stays in memory (with its data) for the rest of the session,
+    and its callbacks keep being called at every event.
+
+    """
+    from phylib.utils.event import _EVENT
+    ids = set(id(o) for o in objects if o is not None)
+
+    def _refers(f):
+        if isinstance(f, partial):
+            return _refers(f.func) or any(id(a) in ids for a in f.args)
+        if id(getattr(f, '__self__', None)) in ids:
+            return True
+        for cell in (getattr(f, '__closure__', None) or ()):
+            try:
+                if id(cell.cell_contents) in ids:
+                    return True
+            except ValueError:  # pragma: no cover
+                # Empty cell.
+                pass
+        return False
+
+    n = len(_EVENT._callbacks)
+    _EVENT._callbacks = [
+        (event, sender, f, kwargs) for (event, sender, f, kwargs) in _EVENT._callbacks
+        if not (id(sender) in ids or id(kwargs.get('view', None)) in ids or _refers(f))]
+    logger.debug("Removed %d event callbacks.", n - len(_EVENT._callbacks))
+
+
 def _get_bunch_bounds(bunch):
     """Return the data bounds of a bunch."""
     if 'data_bounds' in bunch and bunch.data_bounds is not None:
@@ -264,7 +297,20 @@ class ManualClusteringView(object):
             unconnect(on_select)
             gui.state.update_view_state(self, self.state)
             self.canvas.close()
-            gc.collect(0)
+            # Remove the view actions, and delete the (otherwise only hidden) dock widget: both
+            # keep the view, its data and its OpenGL canvas alive for the rest of the session.
+            self.actions.remove_all()
+            if self.actions in gui.actions:
+                gui.actions.remove(self.actions)
+            dock = getattr(self, 'dock', None)
+            if dock is not None:
+                dock.view = None
+                dock.deleteLater()
+            # Release all callbacks referring to this view, so that it can be garbage collected.
+            _unconnect_objects(
+                self, self.canvas, getattr(self.canvas, 'panzoom', None),
+                getattr(self, 'dock', None))
+            gc.collect()
 
         @connect(sender=gui)
         def on_close(sender):

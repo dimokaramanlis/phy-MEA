@@ -464,7 +464,15 @@ class Actions(object):
 
     def remove(self, name):
         """Remove an action."""
-        self.gui.removeAction(self._actions_dict[name].qaction)
+        qaction = self._actions_dict[name].qaction
+        self.gui.removeAction(qaction)
+        # NOTE: the QAction is owned by the GUI, and its callback may keep objects alive (e.g.
+        # a closed view): delete it (this also removes it from the menus and the toolbar).
+        try:
+            qaction.triggered.disconnect()
+        except TypeError:  # pragma: no cover
+            pass
+        qaction.deleteLater()
         del self._actions_dict[name]
         delattr(self, name)
 

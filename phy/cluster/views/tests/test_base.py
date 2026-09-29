@@ -70,3 +70,40 @@ def test_manual_clustering_view_2(qtbot, gui):
     v.canvas.close()
     v.actions.close()
     qtbot.wait(100)
+
+
+def test_unconnect_objects():
+    import gc
+    import weakref
+    from functools import partial
+    from phylib.utils import connect, emit
+    from phylib.utils.event import _EVENT
+    from ..base import _unconnect_objects
+
+    class Obj(object):
+        def on_select(self, sender, *args):
+            pass
+
+    view, canvas, other = Obj(), Obj(), Obj()
+    n = len(_EVENT._callbacks)
+    calls = []
+
+    connect(view.on_select, event='select')
+    connect(partial(view.on_select, 1), event='select')
+    connect(lambda sender: calls.append(view), event='cluster', sender=other)
+    connect(lambda sender: None, event='zoom', sender=canvas)
+    # Unrelated callback: kept.
+    connect(lambda sender: calls.append('kept'), event='cluster', sender=other)
+    assert len(_EVENT._callbacks) == n + 5
+
+    ref = weakref.ref(view)
+    _unconnect_objects(view, canvas)
+    assert len(_EVENT._callbacks) == n + 1
+    emit('cluster', other)
+    assert calls == ['kept']
+
+    del view
+    gc.collect()
+    assert ref() is None
+    _unconnect_objects(other)
+    assert len(_EVENT._callbacks) == n

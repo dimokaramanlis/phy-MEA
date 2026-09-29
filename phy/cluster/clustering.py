@@ -23,6 +23,43 @@ logger = logging.getLogger(__name__)
 # Clustering class
 #------------------------------------------------------------------------------
 
+class _CompactIds(object):
+    """Compact storage, in the undo stack, of per-spike cluster ids: the unique cluster ids,
+    and the index of every spike's cluster in the smallest possible integer type (few
+    clusters are involved in an action, so this is usually 1 byte per spike instead of 8)."""
+    __slots__ = ('unique', 'index')
+
+    def __init__(self, unique, index):
+        self.unique = unique
+        self.index = index
+
+
+def _compact_ids(spike_clusters):
+    """Compact per-spike cluster ids for storage in the undo stack."""
+    spike_clusters = np.asarray(spike_clusters)
+    if spike_clusters.size <= 1:
+        return spike_clusters
+    unique, index = np.unique(spike_clusters, return_inverse=True)
+    dtype = np.uint8 if len(unique) <= 256 else np.uint16 if len(unique) <= 65536 else np.int64
+    return _CompactIds(unique, index.astype(dtype))
+
+
+def _compact_spike_ids(spike_ids, n_spikes):
+    """Store spike ids with 4 bytes instead of 8 when possible."""
+    if n_spikes < 2 ** 31:
+        return np.asarray(spike_ids).astype(np.int32)
+    return spike_ids
+
+
+def _expand_ids(obj):
+    """Inverse of `_compact_ids()` and `_compact_spike_ids()`."""
+    if isinstance(obj, _CompactIds):
+        return obj.unique[obj.index]
+    if isinstance(obj, np.ndarray) and obj.dtype == np.int32:
+        return obj.astype(np.int64)
+    return obj
+
+
 def _extend_spikes(spike_ids, spike_clusters, spikes_per_cluster=None):
     """Return all spikes belonging to the clusters containing the specified
     spikes."""
@@ -181,7 +218,7 @@ class Clustering(object):
         # spike_clusters array in memory.
         while self._undo_stack.current_position > 0:
             spike_ids, _, old_spike_clusters, _ = self._undo_stack.back()
-            self._do_assign(spike_ids, old_spike_clusters)
+            self._do_assign(_expand_ids(spike_ids), _expand_ids(old_spike_clusters))
         self._undo_stack.clear(base_item=(None, None, None, None))
         self._new_cluster_id = self._new_cluster_id_0
 
@@ -391,7 +428,8 @@ class Clustering(object):
         undo_state = emit('request_undo_state', self, up)
 
         # Add to stack.
-        self._undo_stack.add((spike_ids, [to], old_spike_clusters, undo_state))
+        # NOTE: spike_ids is shared with spikes_per_cluster[to], so it is not compacted.
+        self._undo_stack.add((spike_ids, [to], _compact_ids(old_spike_clusters), undo_state))
 
         emit('cluster', self, up)
         return up
@@ -467,7 +505,9 @@ class Clustering(object):
         undo_state = emit('request_undo_state', self, up)
 
         # Add the assignment to the undo stack.
-        self._undo_stack.add((spike_ids, cluster_ids, old_spike_clusters, undo_state))
+        self._undo_stack.add((
+            _compact_spike_ids(spike_ids, self._n_spikes), _compact_ids(cluster_ids),
+            _compact_ids(old_spike_clusters), undo_state))
 
         emit('cluster', self, up)
         return up
@@ -518,7 +558,7 @@ class Clustering(object):
 
         # Restore the assignment of the spikes affected by the last action. This is O(n_changed)
         # instead of replaying the whole history over the full spike_clusters array.
-        up = self._do_assign(spike_ids, old_spike_clusters)
+        up = self._do_assign(_expand_ids(spike_ids), _expand_ids(old_spike_clusters))
         up.history = 'undo'
         # Add the undo_state object from the undone object.
         up.undo_state = undo_state
@@ -549,7 +589,7 @@ class Clustering(object):
         assert spike_ids is not None
 
         # We apply the new assignment.
-        up = self._do_assign(spike_ids, cluster_ids)
+        up = self._do_assign(_expand_ids(spike_ids), _expand_ids(cluster_ids))
         up.history = 'redo'
 
         emit('cluster', self, up)

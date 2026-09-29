@@ -135,7 +135,7 @@ class Context(object):
     cache_limit = 2 * 1024 ** 3  # 2 GB
 
     """Maximum size of the in-memory cache of every memcached function, in bytes."""
-    memcache_limit = 128 * 1024 ** 2  # 128 MB
+    memcache_limit = 32 * 1024 ** 2  # 32 MB
 
     def __init__(self, cache_dir, verbose=0):
         self.verbose = verbose
