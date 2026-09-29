@@ -14,7 +14,7 @@ import logging
 import numpy as np
 
 from ._history import GlobalHistory
-from ._utils import create_cluster_meta
+from ._utils import create_cluster_meta, UpdateInfo, _PER_SPIKE_FIELDS
 from .clustering import Clustering
 
 from phylib.utils import Bunch, emit, connect, unconnect
@@ -45,6 +45,14 @@ def _process_ups(ups):  # pragma: no cover
         raise NotImplementedError()
 
 
+def _light_output(output):
+    """Return a copy of a task output, without the potentially large per-spike arrays,
+    for storage in the task history."""
+    if isinstance(output, UpdateInfo):
+        output = UpdateInfo(**{k: v for k, v in output.items() if k not in _PER_SPIKE_FIELDS})
+    return output
+
+
 def _ensure_all_ints(l):
     if (l is None or l == []):
         return
@@ -62,6 +70,9 @@ class TaskLogger(object):
 
     # Whether to auto select next clusters after a merge.
     auto_select_after_action = False
+
+    # Number of past tasks to keep in the history.
+    _max_history = 1000
 
     def __init__(self, cluster_view=None, similarity_view=None, supervisor=None):
         self.cluster_view = cluster_view
@@ -180,24 +191,8 @@ class TaskLogger(object):
 
     def _after_undo(self, task, output):
         """Task that should follow an undo."""
-
-        # Re-instate cluster labels in table views
-        if output.description and output.description.startswith('metadata_'):
-            which = output.metadata_changed
-            cid = set(self._get_clusters(which))
-            prop = output.description.replace('metadata_', '')
-
-            # Sort changed clusters by their previous metadata value
-            groups = dict()
-            for c in cid:
-                g = self.supervisor.cluster_meta.get(prop, c)
-                groups.setdefault(g, [])
-                groups[g].append(c)
-
-            # Re-instate each group of metadata values
-            for g, c in groups.items():
-                self.supervisor._cluster_metadata_changed(prop, c, g)
-
+        # NOTE: the table views are updated with the restored metadata values in
+        # Supervisor._cluster_metadata_changed(), which reads the actual values.
         last_action = self.last_task(name_not_in=('select', 'next', 'previous', 'undo', 'redo'))
         self._select_state(self.last_state(last_action))
 
@@ -223,10 +218,15 @@ class TaskLogger(object):
         logger.log(
             5, "Log %s %s %s %s (%s)", sender.__class__.__name__, name, args, kwargs, output)
         args = [a.tolist() if isinstance(a, np.ndarray) else a for a in args]
+        output = _light_output(output)
         task = (sender, name, args, kwargs, output)
         # Avoid successive duplicates (even if sender is different).
         if not self._history or self._history[-1][1:] != task[1:]:
             self._history.append(task)
+        # Keep the history bounded: only the recent tasks are needed to restore the selection
+        # after undo/redo, and the history otherwise grows during the whole session.
+        if len(self._history) > 2 * self._max_history:
+            del self._history[:-self._max_history]
 
     def log(self, sender, name, *args, output=None, **kwargs):
         """Add a completed task to the history stack."""
@@ -804,6 +804,8 @@ class Supervisor(object):
     def _clusters_added(self, cluster_ids):
         """Update the cluster and similarity views when new clusters are created."""
         logger.log(5, "Clusters added: %s", cluster_ids)
+        if not len(cluster_ids):
+            return
         data = [self.get_cluster_info(cluster_id) for cluster_id in cluster_ids]
         self.cluster_view.add(data)
         self.similarity_view.add(data)
@@ -811,13 +813,23 @@ class Supervisor(object):
     def _clusters_removed(self, cluster_ids):
         """Update the cluster and similarity views when clusters are removed."""
         logger.log(5, "Clusters removed: %s", cluster_ids)
+        if not len(cluster_ids):
+            return
         self.cluster_view.remove(cluster_ids)
         self.similarity_view.remove(cluster_ids)
 
     def _cluster_metadata_changed(self, field, cluster_ids, value):
         """Update the cluster and similarity views when clusters metadata is updated."""
         logger.log(5, "%s changed for %s to %s", field, cluster_ids, value)
-        data = [{'id': cluster_id, field: value} for cluster_id in cluster_ids]
+        if not len(cluster_ids):
+            return
+        # NOTE: use the actual current values, which differ from `value` after an undo.
+        if field in self.cluster_meta.fields:
+            data = [
+                {'id': cluster_id, field: self.cluster_meta.get(field, cluster_id)}
+                for cluster_id in cluster_ids]
+        else:
+            data = [{'id': cluster_id, field: value} for cluster_id in cluster_ids]
         for _ in data:
             _['is_masked'] = _is_group_masked(_.get('group', None))
         self.cluster_view.change(data)

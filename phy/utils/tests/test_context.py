@@ -153,3 +153,26 @@ def test_pickle_cache(tempdir, context):
         ctx = load(f)
     assert isinstance(ctx, Context)
     assert ctx.cache_dir == context.cache_dir
+
+
+def test_context_memcache_bounded(tempdir, context):
+    context.memcache_limit = 10 * 1000 * 8
+
+    @context.memcache
+    def f(x):
+        return np.zeros(1000)
+
+    for i in range(100):
+        f(i)
+    cache = context._memcache[_fullname(f)]
+    # Only the most recent items are kept.
+    assert 5 <= len(cache) <= 10
+    assert (99,) in cache
+    assert (0,) not in cache
+
+    # The memcache is saved as a plain dictionary and is bounded when loaded.
+    context.save_memcache()
+    context.memcache_limit = 2 * 1000 * 8
+    cache = context.load_memcache(_fullname(f))
+    assert 1 <= len(cache) <= 2
+    assert (99,) in cache

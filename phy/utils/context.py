@@ -6,12 +6,15 @@
 # Imports
 #------------------------------------------------------------------------------
 
+from collections import OrderedDict
 from functools import wraps
 import inspect
 import logging
 import os
 from pathlib import Path
 from pickle import dump, load
+
+import numpy as np
 
 from phylib.utils._misc import save_json, load_json, load_pickle, save_pickle, _fullname
 from .config import phy_config_dir, ensure_dir_exists
@@ -22,6 +25,65 @@ logger = logging.getLogger(__name__)
 #------------------------------------------------------------------------------
 # Context
 #------------------------------------------------------------------------------
+
+def _nbytes(obj):
+    """Rough estimate of the memory used by an object, used to bound the memcache."""
+    if isinstance(obj, np.ndarray):
+        return obj.nbytes + 128
+    if isinstance(obj, dict):
+        return 64 + sum(_nbytes(v) + 64 for v in obj.values())
+    if isinstance(obj, (list, tuple)):
+        return 64 + sum(_nbytes(v) for v in obj)
+    return 32
+
+
+class _LRUMemcache(OrderedDict):
+    """In-memory cache dictionary that evicts the least recently used items when the total size
+    of the cached values exceeds `max_bytes`.
+
+    NOTE: cluster ids are never reused, so every merge/split creates new cache entries while
+    the entries of the deleted clusters are rarely used again. Without a bound, the memcache
+    (which is also persisted and reloaded across sessions) grows indefinitely.
+
+    """
+    def __init__(self, max_bytes=None):
+        super(_LRUMemcache, self).__init__()
+        self.max_bytes = max_bytes
+        self._sizes = {}
+        self._total = 0
+
+    def get(self, key, default=None):
+        try:
+            value = super(_LRUMemcache, self).__getitem__(key)
+        except KeyError:
+            return default
+        self.move_to_end(key)
+        return value
+
+    def __setitem__(self, key, value):
+        if key in self:
+            self._total -= self._sizes.pop(key, 0)
+        super(_LRUMemcache, self).__setitem__(key, value)
+        size = _nbytes(value)
+        self._sizes[key] = size
+        self._total += size
+        self._evict()
+
+    def __delitem__(self, key):
+        super(_LRUMemcache, self).__delitem__(key)
+        self._total -= self._sizes.pop(key, 0)
+
+    def _evict(self):
+        if not self.max_bytes:
+            return
+        # Always keep the most recent item.
+        while self._total > self.max_bytes and len(self) > 1:
+            del self[next(iter(self))]
+
+    def __reduce__(self):
+        # NOTE: pickle as a plain dict, for compatibility with existing memcache files.
+        return (dict, (dict(self),))
+
 
 def _cache_methods(obj, memcached, cached):  # pragma: no cover
     for name in memcached:
@@ -71,6 +133,9 @@ class Context(object):
 
     """Maximum cache size, in bytes."""
     cache_limit = 2 * 1024 ** 3  # 2 GB
+
+    """Maximum size of the in-memory cache of every memcached function, in bytes."""
+    memcache_limit = 128 * 1024 ** 2  # 128 MB
 
     def __init__(self, cache_dir, verbose=0):
         self.verbose = verbose
@@ -122,12 +187,16 @@ class Context(object):
     def load_memcache(self, name):
         """Load the memcache from disk (pickle file), if it exists."""
         path = self.cache_dir / 'memcache' / (name + '.pkl')
+        cache = _LRUMemcache(max_bytes=self.memcache_limit)
         if path.exists():
             logger.debug("Load memcache for `%s`.", name)
-            with open(str(path), 'rb') as fd:
-                cache = load(fd)
-        else:
-            cache = {}
+            try:
+                with open(str(path), 'rb') as fd:
+                    # NOTE: the oldest items are evicted if the saved memcache is too large.
+                    for key, value in load(fd).items():
+                        cache[key] = value
+            except Exception as e:  # pragma: no cover
+                logger.debug("Could not load memcache for `%s`: %s.", name, e)
         self._memcache[name] = cache
         return cache
 

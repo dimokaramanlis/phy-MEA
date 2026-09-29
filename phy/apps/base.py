@@ -437,7 +437,7 @@ class TemplateMixin(object):
     _memcached = (
         '_get_template_waveforms',
         'get_mean_spike_template_amplitudes',
-        'get_template_counts',
+        '_get_template_ids_counts',
         'get_template_for_cluster',
         'get_template_amplitude',
         'get_cluster_amplitude',
@@ -457,17 +457,28 @@ class TemplateMixin(object):
         spike_ids = self._get_amplitude_spike_ids(cluster_id, load_all=load_all)
         return self.model.amplitudes[spike_ids]
 
-    def get_template_counts(self, cluster_id):
-        """Return a histogram of the number of spikes in each template for a given cluster."""
+    def _get_template_ids_counts(self, cluster_id):
+        """Return the ids of the templates of the spikes of a given cluster, and the number of
+        spikes in each of these templates.
+
+        NOTE: this sparse representation is memcached instead of the dense n_templates-long
+        histogram returned by `get_template_counts()`.
+
+        """
         spike_ids = self.supervisor.clustering.spikes_per_cluster[cluster_id]
         st = self.model.spike_templates[spike_ids]
-        return np.bincount(st, minlength=self.model.n_templates)
+        return np.unique(st, return_counts=True)
+
+    def get_template_counts(self, cluster_id):
+        """Return a histogram of the number of spikes in each template for a given cluster."""
+        template_ids, counts = self._get_template_ids_counts(cluster_id)
+        out = np.zeros(self.model.n_templates, dtype=np.int64)
+        out[template_ids] = counts
+        return out
 
     def get_template_for_cluster(self, cluster_id):
         """Return the largest template associated to a cluster."""
-        spike_ids = self.supervisor.clustering.spikes_per_cluster[cluster_id]
-        st = self.model.spike_templates[spike_ids]
-        template_ids, counts = np.unique(st, return_counts=True)
+        template_ids, counts = self._get_template_ids_counts(cluster_id)
         ind = np.argmax(counts)
         return template_ids[ind]
 
@@ -522,22 +533,25 @@ class TemplateMixin(object):
     def _get_template_waveforms(self, cluster_id):
         """Return the waveforms of the templates corresponding to a cluster."""
         pos = self.model.channel_positions
-        count = self.get_template_counts(cluster_id)
-        template_ids = np.nonzero(count)[0]
-        count = count[template_ids]
+        template_ids, count = self._get_template_ids_counts(cluster_id)
         # Get local channels.
-        channel_ids = self.get_best_channels(cluster_id)
+        channel_ids = np.asarray(self.get_best_channels(cluster_id))
         # Get masks, related to the number of spikes per template which the cluster stems from.
         masks = count / float(count.max())
         masks = np.tile(masks.reshape((-1, 1)), (1, len(channel_ids)))
         # Get all templates from which this cluster stems from.
         templates = [self.model.get_template(template_id) for template_id in template_ids]
-        # Construct the waveforms array.
+        # Construct the waveforms array, directly on the local channels (allocating an array
+        # on all channels is slow and memory hungry with many channels).
         ns = self.model.n_samples_waveforms
-        data = np.zeros((len(template_ids), ns, self.model.n_channels))
+        # Position of every channel in channel_ids, or -1 if it is not a local channel.
+        local = np.full(self.model.n_channels, -1, dtype=np.int64)
+        local[channel_ids] = np.arange(len(channel_ids))
+        waveforms = np.zeros((len(template_ids), ns, len(channel_ids)))
         for i, b in enumerate(templates):
-            data[i][:, b.channel_ids] = b.template
-        waveforms = data[..., channel_ids]
+            idx = local[b.channel_ids]
+            keep = idx >= 0
+            waveforms[i][:, idx[keep]] = b.template[:, keep]
         assert waveforms.shape == (len(template_ids), ns, len(channel_ids))
         return Bunch(
             data=waveforms,
@@ -815,7 +829,8 @@ class BaseController(object):
         'get_best_channels',
         'get_channel_shank',
         'get_probe_depth',
-        'peak_channel_similarity',
+        # NOTE: peak_channel_similarity is not memcached: its output depends on the current
+        # list of clusters, which changes after every merge/split.
     )
     # Methods that are cached on disk for performance.
     _cached = (

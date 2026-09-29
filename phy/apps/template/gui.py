@@ -154,7 +154,7 @@ class TemplateController(WaveformMixin, FeatureMixin, TemplateMixin, TraceMixin,
     def template_similarity(self, cluster_id):
         """Return the list of similar clusters to a given cluster."""
         # Templates of the cluster.
-        temp_i = np.nonzero(self.get_template_counts(cluster_id))[0]
+        temp_i = self._get_template_ids_counts(cluster_id)[0]
         # The similarity of the cluster with each template.
         sims = np.max(self.model.similar_templates[temp_i, :], axis=0)
 
@@ -162,7 +162,7 @@ class TemplateController(WaveformMixin, FeatureMixin, TemplateMixin, TraceMixin,
             # Templates of the cluster.
             if cj < self.model.n_templates:
                 return float(sims[cj])
-            temp_j = np.nonzero(self.get_template_counts(cj))[0]
+            temp_j = self._get_template_ids_counts(cj)[0]
             return float(np.max(sims[temp_j]))
 
         out = [(cj, _sim_ij(cj)) for cj in self.supervisor.clustering.cluster_ids]

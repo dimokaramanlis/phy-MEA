@@ -210,3 +210,37 @@ def test_rotating_property():
     assert rp.get() == 3
     assert rp.next() == 'f1'
     assert rp.previous() == 'f3'
+
+
+def test_metadata_undo_keeps_values_outside_stack():
+    """Undoing a metadata change must not erase values that were set outside of the undo
+    stack (e.g. labels loaded from cluster_*.tsv files, or inherited after a merge)."""
+    meta = create_cluster_meta({1: 'good'})
+    # Labels loaded from TSV files, after the initial from_dict().
+    meta.add_field('comment')
+    meta.set('comment', [1], 'nice', add_to_stack=False)
+    meta.set('comment', [2], 'bursty', add_to_stack=False)
+    meta.set('depth', [2], 100, add_to_stack=False)
+
+    meta.set('comment', [2, 3], 'changed')
+    assert meta.get('comment', 2) == meta.get('comment', 3) == 'changed'
+
+    meta.undo()
+    assert meta.get('group', 1) == 'good'
+    assert meta.get('comment', 1) == 'nice'
+    assert meta.get('comment', 2) == 'bursty'
+    assert meta.get('comment', 3) is None
+    assert meta.get('depth', 2) == 100
+
+    meta.redo()
+    assert meta.get('comment', 2) == meta.get('comment', 3) == 'changed'
+    assert meta.get('comment', 1) == 'nice'
+
+    # Inherited values (set_from_descendants) survive an unrelated undo.
+    meta.set_from_descendants([(1, 10)])
+    assert meta.get('comment', 10) == 'nice'
+    meta.set('group', [4], 'mua')
+    meta.undo()
+    assert meta.get('comment', 10) == 'nice'
+    assert meta.get('group', 10) == 'good'
+    assert meta.get('group', 4) is None

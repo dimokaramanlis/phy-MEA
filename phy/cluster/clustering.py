@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # Clustering class
 #------------------------------------------------------------------------------
 
-def _extend_spikes(spike_ids, spike_clusters):
+def _extend_spikes(spike_ids, spike_clusters, spikes_per_cluster=None):
     """Return all spikes belonging to the clusters containing the specified
     spikes."""
     # We find the spikes belonging to modified clusters.
@@ -31,7 +31,12 @@ def _extend_spikes(spike_ids, spike_clusters):
     old_spike_clusters = spike_clusters[spike_ids]
     unique_clusters = _unique(old_spike_clusters)
     # Now we take all spikes from these clusters.
-    changed_spike_ids = _spikes_in_clusters(spike_clusters, unique_clusters)
+    if spikes_per_cluster is not None:
+        # OPTIM: avoid going through all spikes.
+        changed_spike_ids = np.sort(np.concatenate(
+            [_as_array(spikes_per_cluster[c]) for c in unique_clusters])).astype(np.int64)
+    else:
+        changed_spike_ids = _spikes_in_clusters(spike_clusters, unique_clusters)
     # These are the new spikes that need to be reassigned.
     extended_spike_ids = np.setdiff1d(changed_spike_ids, spike_ids, assume_unique=True)
     return extended_spike_ids
@@ -46,7 +51,9 @@ def _concatenate_spike_clusters(*pairs):
     return concat[:, 0].astype(np.int64), concat[:, 1].astype(np.int64)
 
 
-def _extend_assignment(spike_ids, old_spike_clusters, spike_clusters_rel, new_cluster_id):
+def _extend_assignment(
+        spike_ids, old_spike_clusters, spike_clusters_rel, new_cluster_id,
+        spikes_per_cluster=None):
     # 1. Add spikes that belong to modified clusters.
     # 2. Find new cluster ids for all changed clusters.
 
@@ -61,7 +68,8 @@ def _extend_assignment(spike_ids, old_spike_clusters, spike_clusters_rel, new_cl
     new_spike_clusters = (spike_clusters_rel + (new_cluster_id - spike_clusters_rel.min()))
 
     # We find the spikes belonging to modified clusters.
-    extended_spike_ids = _extend_spikes(spike_ids, old_spike_clusters)
+    extended_spike_ids = _extend_spikes(
+        spike_ids, old_spike_clusters, spikes_per_cluster=spikes_per_cluster)
     if len(extended_spike_ids) == 0:
         return spike_ids, new_spike_clusters
 
@@ -82,11 +90,16 @@ def _assign_update_info(spike_ids, old_spike_clusters, new_spike_clusters):
     old_clusters = _unique(old_spike_clusters)
     new_clusters = _unique(new_spike_clusters)
     largest_old_cluster = np.bincount(old_spike_clusters).argmax()
-    descendants = list(set(zip(old_spike_clusters, new_spike_clusters)))
+    # Unique (old, new) pairs, vectorized (a Python loop over all spikes is slow).
+    old_spike_clusters = np.asarray(old_spike_clusters, dtype=np.int64)
+    new_spike_clusters = np.asarray(new_spike_clusters, dtype=np.int64)
+    k = int(new_spike_clusters.max()) + 1
+    pairs = np.unique(old_spike_clusters * k + new_spike_clusters)
+    descendants = [(int(p // k), int(p % k)) for p in pairs]
     update_info = UpdateInfo(
         description='assign',
-        spike_ids=list(spike_ids),
-        spike_clusters=list(new_spike_clusters),
+        spike_ids=np.asarray(spike_ids),
+        spike_clusters=np.asarray(new_spike_clusters),
         added=list(new_clusters),
         deleted=list(old_clusters),
         descendants=descendants,
@@ -124,8 +137,8 @@ class Clustering(object):
     -----
 
     The undo stack works by keeping the list of all spike cluster changes
-    made successively. Undoing consists of reapplying all changes from the
-    original `spike_clusters` array, except the last one.
+    made successively, together with the previous assignment of the affected
+    spikes. Undoing consists of restoring that previous assignment.
 
     UpdateInfo
     ----------
@@ -142,7 +155,9 @@ class Clustering(object):
     def __init__(self, spike_clusters, new_cluster_id=None,
                  spikes_per_cluster=None):
         super(Clustering, self).__init__()
-        self._undo_stack = History(base_item=(None, None, None))
+        # The stack contains (spike_ids, new_spike_clusters, old_spike_clusters, undo_state)
+        # tuples. Undoing an action simply restores the old assignment of the affected spikes.
+        self._undo_stack = History(base_item=(None, None, None, None))
         # Spike -> cluster mapping.
         self._spike_clusters = _as_array(spike_clusters)
         self._spikes_per_cluster = {}
@@ -155,8 +170,6 @@ class Clustering(object):
         self._new_cluster_id = self._new_cluster_id_0
         assert self._new_cluster_id >= 0
         assert np.all(self._spike_clusters < self._new_cluster_id)
-        # Keep a copy of the original spike clusters assignment.
-        self._spike_clusters_base = self._spike_clusters.copy()
 
     def reset(self):
         """Reset the clustering to the original clustering.
@@ -164,8 +177,12 @@ class Clustering(object):
         All changes are lost.
 
         """
-        self._undo_stack.clear()
-        self._spike_clusters = self._spike_clusters_base
+        # NOTE: we undo all actions instead of keeping a full copy of the original
+        # spike_clusters array in memory.
+        while self._undo_stack.current_position > 0:
+            spike_ids, _, old_spike_clusters, _ = self._undo_stack.back()
+            self._do_assign(spike_ids, old_spike_clusters)
+        self._undo_stack.clear(base_item=(None, None, None, None))
         self._new_cluster_id = self._new_cluster_id_0
 
     @property
@@ -219,9 +236,31 @@ class Clustering(object):
     # Actions
     #--------------------------------------------------------------------------
 
-    def _update_cluster_ids(self, to_remove=None, to_add=None):
+    def _spikes_per_cluster_coherent(self):
+        """Check that spikes_per_cluster (which may come from the cache) matches spike_clusters.
+        This is important because merges rely on spikes_per_cluster."""
+        spc = self._spikes_per_cluster
+        if not np.all(np.in1d(self._cluster_ids, sorted(spc))):
+            return False
+        sc = self._spike_clusters
+        n = 0
+        for clu in self._cluster_ids:
+            spk = _as_array(spc[clu])
+            n += len(spk)
+            if len(spk) and (spk.max() >= len(sc) or np.any(sc[spk] != clu)):
+                return False
+        return n == len(sc)
+
+    def _update_cluster_ids(self, to_remove=None, to_add=None, incremental=False):
         # Update the list of non-empty cluster ids.
-        self._cluster_ids = _unique(self._spike_clusters)
+        if incremental:
+            # OPTIM: after an action, the removed clusters are empty and the added clusters
+            # are new, so there is no need to go through the whole spike_clusters array.
+            cluster_ids = np.setdiff1d(self._cluster_ids, np.asarray(list(to_remove)))
+            self._cluster_ids = np.union1d(
+                cluster_ids, np.asarray(list(to_add), dtype=cluster_ids.dtype))
+        else:
+            self._cluster_ids = _unique(self._spike_clusters)
         # Clusters to remove.
         if to_remove is not None:
             for clu in to_remove:
@@ -230,9 +269,11 @@ class Clustering(object):
         if to_add:
             for clu, spk in to_add.items():
                 self._spikes_per_cluster[clu] = spk
+        if incremental:
+            return
         # If spikes_per_cluster is invalid, recompute the entire
         # spikes_per_cluster array.
-        coherent = np.all(np.in1d(self._cluster_ids, sorted(self._spikes_per_cluster)))
+        coherent = self._spikes_per_cluster_coherent()
         if not coherent:
             logger.debug("Recompute spikes_per_cluster manually: this might take a while.")
             sc = self._spike_clusters
@@ -272,7 +313,7 @@ class Clustering(object):
         self._spike_clusters[spike_ids] = new_spike_clusters
         # OPTIM: we update spikes_per_cluster manually.
         new_spc = _spikes_per_cluster(new_spike_clusters, spike_ids)
-        self._update_cluster_ids(to_remove=old_clusters, to_add=new_spc)
+        self._update_cluster_ids(to_remove=old_clusters, to_add=new_spc, incremental=True)
         up.all_cluster_ids = list(self.cluster_ids)
         return up
 
@@ -283,7 +324,8 @@ class Clustering(object):
         largest_old_cluster = np.bincount(self.spike_clusters[spike_ids]).argmax()
         up = UpdateInfo(
             description='merge',
-            spike_ids=list(spike_ids),
+            # NOTE: keep the array, a Python list takes several times more memory.
+            spike_ids=spike_ids,
             added=[to],
             deleted=list(cluster_ids),
             descendants=descendants,
@@ -297,7 +339,8 @@ class Clustering(object):
         self.spike_clusters[spike_ids] = to
         # Update the list of non-empty cluster ids.
         # OPTIM: we update spikes_per_cluster manually.
-        self._update_cluster_ids(to_remove=cluster_ids, to_add={to: spike_ids})
+        self._update_cluster_ids(
+            to_remove=cluster_ids, to_add={to: spike_ids}, incremental=True)
         up.all_cluster_ids = list(self.cluster_ids)
         return up
 
@@ -339,13 +382,16 @@ class Clustering(object):
         # cheaper operation.
 
         # Find all spikes in the specified clusters.
-        spike_ids = _spikes_in_clusters(self.spike_clusters, cluster_ids)
+        # OPTIM: use spikes_per_cluster rather than going through all spikes.
+        spike_ids = np.sort(np.concatenate(
+            [_as_array(self._spikes_per_cluster[c]) for c in cluster_ids])).astype(np.int64)
+        old_spike_clusters = self._spike_clusters[spike_ids]
 
         up = self._do_merge(spike_ids, cluster_ids, to)
         undo_state = emit('request_undo_state', self, up)
 
         # Add to stack.
-        self._undo_stack.add((spike_ids, [to], undo_state))
+        self._undo_stack.add((spike_ids, [to], old_spike_clusters, undo_state))
 
         emit('cluster', self, up)
         return up
@@ -413,13 +459,15 @@ class Clustering(object):
         # belong to clusters affected by the operation, will be assigned
         # to brand new clusters.
         spike_ids, cluster_ids = _extend_assignment(
-            spike_ids, self._spike_clusters, spike_clusters_rel, self.new_cluster_id())
+            spike_ids, self._spike_clusters, spike_clusters_rel, self.new_cluster_id(),
+            spikes_per_cluster=self._spikes_per_cluster)
+        old_spike_clusters = self._spike_clusters[spike_ids]
 
         up = self._do_assign(spike_ids, cluster_ids)
         undo_state = emit('request_undo_state', self, up)
 
         # Add the assignment to the undo stack.
-        self._undo_stack.add((spike_ids, cluster_ids, undo_state))
+        self._undo_stack.add((spike_ids, cluster_ids, old_spike_clusters, undo_state))
 
         emit('cluster', self, up)
         return up
@@ -462,22 +510,15 @@ class Clustering(object):
         up : UpdateInfo instance of the changes done by this operation.
 
         """
-        _, _, undo_state = self._undo_stack.back()
+        item = self._undo_stack.back()
+        if item is None:
+            # Nothing to undo.
+            return
+        spike_ids, _, old_spike_clusters, undo_state = item
 
-        # Retrieve the initial spike_cluster structure.
-        spike_clusters_new = self._spike_clusters_base.copy()
-
-        # Loop over the history (except the last item because we undo).
-        for spike_ids, cluster_ids, _ in self._undo_stack:
-            # We update the spike clusters accordingly.
-            if spike_ids is not None:
-                spike_clusters_new[spike_ids] = cluster_ids
-
-        # What are the spikes affected by the last changes?
-        changed = np.nonzero(self._spike_clusters != spike_clusters_new)[0]
-        clusters_changed = spike_clusters_new[changed]
-
-        up = self._do_assign(changed, clusters_changed)
+        # Restore the assignment of the spikes affected by the last action. This is O(n_changed)
+        # instead of replaying the whole history over the full spike_clusters array.
+        up = self._do_assign(spike_ids, old_spike_clusters)
         up.history = 'undo'
         # Add the undo_state object from the undone object.
         up.undo_state = undo_state
@@ -504,7 +545,7 @@ class Clustering(object):
         # It represents data associated to the state
         # *before* the action. What might be more useful would be the
         # undo_state object of the next item in the list (if it exists).
-        spike_ids, cluster_ids, undo_state = item
+        spike_ids, cluster_ids, _, undo_state = item
         assert spike_ids is not None
 
         # We apply the new assignment.

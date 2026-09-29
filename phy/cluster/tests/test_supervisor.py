@@ -777,3 +777,26 @@ def test_supervisor_nav(qtbot, supervisor):
     supervisor.select_actions.last()
     qtbot.wait(100)
     _assert_selected(supervisor, [1])
+
+
+def test_supervisor_label_undo(supervisor):
+    # 'test_label' is loaded from a cluster_*.tsv file (see the cluster_labels fixture).
+    assert supervisor.get_labels('test_label')[10] == 123
+    supervisor.label("comment", "first", cluster_ids=[20])
+    supervisor.block()
+    supervisor.label("comment", "second", cluster_ids=[20, 30])
+    supervisor.block()
+
+    supervisor.undo()
+    supervisor.block()
+    assert supervisor.get_labels('comment')[20] == 'first'
+    assert supervisor.get_labels('comment')[30] is None
+    # Labels loaded from TSV files, and the groups, are kept.
+    assert supervisor.get_labels('test_label')[10] == 123
+    assert supervisor.get_labels('test_label')[0] == 456
+    assert supervisor.cluster_meta.get('group', 1) == 'good'
+
+    supervisor.redo()
+    supervisor.block()
+    assert supervisor.get_labels('comment')[30] == 'second'
+    assert supervisor.get_labels('test_label')[10] == 123

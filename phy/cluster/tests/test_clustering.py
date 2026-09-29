@@ -476,6 +476,8 @@ def test_clustering_long():
     # Merge to a given cluster.
     clustering.spike_clusters[:] = spike_clusters_base[:]
     clustering._new_cluster_id = 11
+    # HACK: need to update manually here, merges rely on spikes_per_cluster.
+    clustering._update_cluster_ids()
 
     my_spikes_0 = np.nonzero(np.in1d(clustering.spike_clusters, [4, 6]))[0]
     info = clustering.merge([4, 6], 11)
@@ -494,3 +496,44 @@ def test_clustering_long():
     clustering.assign(my_spikes, clusters)
     clu = clustering.spike_clusters[my_spikes]
     ae(clu - clu[0], clusters)
+
+
+def test_clustering_undo_redo_random():
+    """Check undo/redo against the successive states of a sequence of merges and splits."""
+    rng = np.random.RandomState(0)
+    n_spikes = 2000
+    spike_clusters = artificial_spike_clusters(n_spikes, 20)
+    clustering = Clustering(spike_clusters.copy())
+    states = [clustering.spike_clusters.copy()]
+    for i in range(30):
+        if i % 2 == 0:
+            clusters = rng.choice(clustering.cluster_ids, 2, replace=False)
+            clustering.merge(list(clusters))
+        else:
+            spikes = rng.choice(n_spikes, 50, replace=False)
+            clustering.split(spikes)
+        states.append(clustering.spike_clusters.copy())
+        # Sometimes undo and redo in the middle.
+        if i % 7 == 3:
+            clustering.undo()
+            ae(clustering.spike_clusters, states[-2])
+            clustering.redo()
+            ae(clustering.spike_clusters, states[-1])
+
+    for state in states[-2::-1]:
+        clustering.undo()
+        ae(clustering.spike_clusters, state)
+        spc = clustering.spikes_per_cluster
+        assert sorted(spc) == list(clustering.cluster_ids)
+        for c in clustering.cluster_ids:
+            ae(spc[c], np.nonzero(state == c)[0])
+    # Nothing more to undo.
+    assert clustering.undo() is None
+    ae(clustering.spike_clusters, spike_clusters)
+
+    for state in states[1:]:
+        clustering.redo()
+        ae(clustering.spike_clusters, state)
+
+    clustering.reset()
+    ae(clustering.spike_clusters, spike_clusters)

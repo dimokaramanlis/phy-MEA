@@ -8,13 +8,18 @@
 
 import numpy as np
 
-from copy import deepcopy
 import logging
 
 from ._history import History
-from phylib.utils import Bunch, _as_list, _is_list, emit, silent
+from phylib.utils import Bunch, _as_list, _is_list, emit
 
 logger = logging.getLogger(__name__)
+
+# Sentinel for a cluster that had no value for a metadata field.
+_MISSING = object()
+
+# UpdateInfo fields that may contain large per-spike arrays.
+_PER_SPIKE_FIELDS = ('spike_ids', 'spike_clusters')
 
 
 #------------------------------------------------------------------------------
@@ -94,8 +99,12 @@ class UpdateInfo(Bunch):
         d.update(kwargs)
         super(UpdateInfo, self).__init__(d)
         # NOTE: we have to ensure we only use native types and not NumPy arrays so that
-        # the history stack works correctly.
-        assert all(not isinstance(v, np.ndarray) for v in self.values())
+        # the history stack works correctly. The per-spike arrays are an exception: converting
+        # them to lists is slow and memory hungry, and they are stripped before the UpdateInfo
+        # is stored in the task history.
+        assert all(
+            not isinstance(v, np.ndarray) for k, v in self.items()
+            if k not in _PER_SPIKE_FIELDS)
 
     def __repr__(self):
         desc = self.description
@@ -126,10 +135,14 @@ class ClusterMeta(object):
 
     def _reset_data(self):
         self._data = {}
-        self._data_base = {}
-        # The stack contains (clusters, field, value, update_info, undo_state)
-        # tuples.
-        self._undo_stack = History((None, None, None, None, None))
+        # The stack contains (clusters, field, value, old_values, update_info, undo_state)
+        # tuples, where old_values lists the value of every cluster *before* the change
+        # (_MISSING if the cluster had no value for that field).
+        # NOTE: undo restores these old values instead of replaying the whole history from a
+        # base snapshot. Replaying erased every value set outside of the undo stack (labels
+        # loaded from cluster_*.tsv files, metadata inherited by new clusters after a
+        # merge/split...), and became slower as the history grew.
+        self._undo_stack = History((None, None, None, None, None, None))
 
     @property
     def fields(self):
@@ -147,18 +160,35 @@ class ClusterMeta(object):
 
     def from_dict(self, dic):
         """Import data from a `{cluster_id: {field: value}}` dictionary."""
-        #self._reset_data()
-        # Do not raise events here.
-        with silent():
-            for cluster, vals in dic.items():
-                for field, value in vals.items():
-                    self.set(field, [cluster], value, add_to_stack=False)
-        self._data_base = deepcopy(self._data)
+        for cluster, vals in dic.items():
+            for field, value in vals.items():
+                self._set_values(field, [cluster], value)
 
     def to_dict(self, field):
         """Export data to a `{cluster_id: value}` dictionary, for a particular field."""
         assert field in self._fields, "This field doesn't exist"
         return {cluster: self.get(field, cluster) for cluster in self._data.keys()}
+
+    def _set_values(self, field, clusters, value):
+        """Set the value of some clusters without raising events or touching the undo stack.
+        Return the list of old values."""
+        if field not in self._fields:
+            self.add_field(field)
+        old_values = []
+        for cluster in clusters:
+            d = self._data.setdefault(cluster, {})
+            old_values.append(d.get(field, _MISSING))
+            d[field] = value
+        return old_values
+
+    def _restore_values(self, field, clusters, old_values):
+        """Restore the values of some clusters, as returned by `_set_values()`."""
+        for cluster, old in zip(clusters, old_values):
+            d = self._data.setdefault(cluster, {})
+            if old is _MISSING:
+                d.pop(field, None)
+            else:
+                d[field] = old
 
     def set(self, field, clusters, value, add_to_stack=True):
         """Set the value of one of several clusters.
@@ -181,25 +211,17 @@ class ClusterMeta(object):
         up : UpdateInfo instance
 
         """
-        # Add the field if it doesn't exist.
-        if field not in self._fields:
-            self.add_field(field)
-        assert field in self._fields
-
         clusters = _as_list(clusters)
-        for cluster in clusters:
-            if cluster not in self._data:
-                self._data[cluster] = {}
-            self._data[cluster][field] = value
+        old_values = self._set_values(field, clusters, value)
 
         up = UpdateInfo(description='metadata_' + field,
                         metadata_changed=clusters,
                         metadata_value=value,
                         )
-        undo_state = emit('request_undo_state', self, up)
 
         if add_to_stack:
-            self._undo_stack.add((clusters, field, value, up, undo_state))
+            undo_state = emit('request_undo_state', self, up)
+            self._undo_stack.add((clusters, field, value, old_values, up, undo_state))
             emit('cluster', self, up)
 
         return up
@@ -252,7 +274,7 @@ class ClusterMeta(object):
             # Set the new value to all new clusters that don't already have a non-default value.
             for new in new_clusters:
                 if self.get(field, new) == default:
-                    self.set(field, new, new_value, add_to_stack=False)
+                    self._set_values(field, [new], new_value)
 
     def undo(self):
         """Undo the last metadata change.
@@ -266,13 +288,10 @@ class ClusterMeta(object):
         args = self._undo_stack.back()
         if args is None:
             return
-        self._data = deepcopy(self._data_base)
-        for clusters, field, value, up, undo_state in self._undo_stack:
-            if clusters is not None:
-                self.set(field, clusters, value, add_to_stack=False)
+        clusters, field, value, old_values, up, undo_state = args
+        self._restore_values(field, clusters, old_values)
 
         # Return the UpdateInfo instance of the undo action.
-        up, undo_state = args[-2:]
         up.history = 'undo'
         up.undo_state = undo_state
 
@@ -291,8 +310,8 @@ class ClusterMeta(object):
         args = self._undo_stack.forward()
         if args is None:
             return
-        clusters, field, value, up, undo_state = args
-        self.set(field, clusters, value, add_to_stack=False)
+        clusters, field, value, old_values, up, undo_state = args
+        self._set_values(field, clusters, value)
 
         # Return the UpdateInfo instance of the redo action.
         up.history = 'redo'
