@@ -289,7 +289,10 @@ class ManualClusteringView(object):
         connect(on_select, event='select')
 
         # Save the view state in the GUI state.
-        @connect(view=self)
+        # NOTE: the close_view event is emitted with the closed view as sender. The `view=`
+        # keyword of connect() does not filter anything: with it, closing any view closed and
+        # disconnected all views.
+        @connect(sender=self)
         def on_close_view(view_, gui):
             logger.debug("Close view %s.", self.name)
             self._closed = True
@@ -320,6 +323,9 @@ class ManualClusteringView(object):
         self._set_floating = AsyncCaller(delay=5)
         @self._set_floating.set
         def _set_floating():
+            # NOTE: the dock is deleted if the view has been closed in the meantime.
+            if getattr(self, '_closed', False):
+                return
             self.dock.setFloating(False)
 
         emit('view_attached', self, gui)

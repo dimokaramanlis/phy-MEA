@@ -157,6 +157,33 @@ def test_task_split(tl):
     assert tl.last_state() == ([1000, 1001], 1002, None, None)
 
 
+def test_task_split_large_args(tl):
+    # Large array arguments (e.g. spike ids passed by a split plugin) are not stored in the
+    # task history as lists.
+    spike_ids = np.arange(100000)
+    tl.enqueue(tl.cluster_view, 'select', [0])
+    tl.enqueue(tl.supervisor, 'split', spike_ids, [1000, 1001])
+    tl.process()
+    tl.enqueue(tl.supervisor, 'split', spike_ids, [1002, 1003])
+    tl.process()
+    assert tl.last_state() == ([1002, 1003], 1004, None, None)
+
+    splits = [t for t in tl._history if t[1] == 'split']
+    assert len(splits) == 2
+    args = splits[0][2]
+    assert isinstance(args[0], _supervisor._LargeArray)
+    assert args[0].shape == spike_ids.shape
+    # Small arrays are kept, as lists.
+    assert _supervisor._light_arg(np.array([3, 4])) == [3, 4]
+    # Successive splits with arrays of the same shape are not considered as duplicates.
+    assert splits[0][2][0] != splits[1][2][0]
+    assert tl.last_task('split') == splits[1]
+
+    tl.enqueue(tl.supervisor, 'undo')
+    tl.process()
+    assert tl.last_state() == ([1000, 1001], 1002, None, None)
+
+
 def test_task_move_1(tl):
     tl.enqueue(tl.cluster_view, 'select', [0])
     tl.enqueue(tl.supervisor, 'move', [0], 'good')

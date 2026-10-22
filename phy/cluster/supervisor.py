@@ -53,6 +53,35 @@ def _light_output(output):
     return output
 
 
+class _LargeArray(object):
+    """Placeholder of a large array argument (e.g. spike ids passed to split) in the task
+    history. Only its shape and dtype are kept; it is only equal to itself."""
+    __slots__ = ('shape', 'dtype')
+
+    def __init__(self, arr):
+        self.shape = arr.shape
+        self.dtype = arr.dtype
+
+    def __repr__(self):
+        return '<array %s %s>' % (self.dtype, self.shape)
+
+
+# Array arguments larger than this are not stored in the task history.
+_MAX_HISTORY_ARRAY_SIZE = 1000
+
+
+def _light_arg(arg):
+    """Return a light version of a task argument for storage in the task history.
+
+    NOTE: per-spike arrays converted to lists take ~36 bytes per spike: storing them for the
+    last thousand tasks (e.g. splits made by plugins) could take several GB.
+
+    """
+    if isinstance(arg, np.ndarray):
+        return arg.tolist() if arg.size <= _MAX_HISTORY_ARRAY_SIZE else _LargeArray(arg)
+    return arg
+
+
 def _ensure_all_ints(l):
     if (l is None or l == []):
         return
@@ -124,8 +153,12 @@ class TaskLogger(object):
             def _cluster_callback(tsender, up):
                 self._callback(task, up)
             connect(_cluster_callback, event='cluster', sender=self.supervisor)
-            f(*args, **kwargs)
-            unconnect(_cluster_callback)
+            # NOTE: unconnect even if the action fails, otherwise the callback stays connected
+            # and is called again at every subsequent clustering action.
+            try:
+                f(*args, **kwargs)
+            finally:
+                unconnect(_cluster_callback)
 
     def process(self):
         """Process all tasks in queue."""
@@ -217,7 +250,8 @@ class TaskLogger(object):
         assert name
         logger.log(
             5, "Log %s %s %s %s (%s)", sender.__class__.__name__, name, args, kwargs, output)
-        args = [a.tolist() if isinstance(a, np.ndarray) else a for a in args]
+        args = [_light_arg(a) for a in args]
+        kwargs = {k: _light_arg(v) for k, v in kwargs.items()}
         output = _light_output(output)
         task = (sender, name, args, kwargs, output)
         # Avoid successive duplicates (even if sender is different).

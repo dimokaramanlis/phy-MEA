@@ -130,8 +130,32 @@ class Variable(GLObject):
         # CPU data
         self._data = None
 
+        # Whether the GPU object in self._data (buffer, texture) was created by this variable
+        # from a plain array, rather than passed by the caller (who may share it).
+        self._owns_data = False
+
         # Whether this variable is active
         self._active = True
+
+    def _set_owned_data(self, data, owned):
+        """Replace the variable data, releasing the GPU object of the previous data if it was
+        created by this variable.
+
+        NOTE: without this, every new array assigned to an attribute or texture allocates a
+        new GPU object while the previous one is never deleted: the GPU memory, and the copy
+        of it the driver may keep in RAM, grow indefinitely as views are updated.
+
+        """
+        old = self._data
+        if (self._owns_data and old is not data and isinstance(old, GLObject) and
+                old._handle > -1):
+            # The GL context may not be current here: the program deletes the object the next
+            # time it is drawn.
+            release = getattr(self._program, '_release', None)
+            if release is not None:
+                release(old)
+        self._data = data
+        self._owns_data = owned
 
     @property
     def name(self):
@@ -209,7 +233,7 @@ class Uniform(Variable):
         if self._gtype == gl.GL_SAMPLER_1D:
 
             if isinstance(data, Texture1D):
-                self._data = data
+                self._set_owned_data(data, False)
 
             elif isinstance(self._data, Texture1D):
                 self._data.set_data(data)
@@ -218,13 +242,13 @@ class Uniform(Variable):
             else:
                 data = np.array(data, copy=False)
                 if data.dtype in [np.float16, np.float32, np.float64]:
-                    self._data = data.astype(np.float32).view(Texture1D)
+                    self._set_owned_data(data.astype(np.float32).view(Texture1D), True)
                 else:
-                    self._data = data.view(Texture1D)
+                    self._set_owned_data(data.view(Texture1D), True)
 
         elif self._gtype == gl.GL_SAMPLER_2D:
             if isinstance(data, Texture2D):
-                self._data = data
+                self._set_owned_data(data, False)
             elif isinstance(self._data, Texture2D) and data.size == self._data.size:
                 # self._data.set_data(data)
                 self._data[...] = data.reshape(self._data.shape)
@@ -233,13 +257,13 @@ class Uniform(Variable):
             else:
                 data = np.array(data, copy=False)
                 if data.dtype in [np.float16, np.float32, np.float64]:
-                    self._data = data.astype(np.float32).view(Texture2D)
+                    self._set_owned_data(data.astype(np.float32).view(Texture2D), True)
                 else:
-                    self._data = data.view(Texture2D)
+                    self._set_owned_data(data.view(Texture2D), True)
 
         elif self._gtype == gl.GL_SAMPLER_CUBE:
             if isinstance(data, TextureCube):
-                self._data = data
+                self._set_owned_data(data, False)
             elif isinstance(self._data, TextureCube):
                 self._data[...] = data.reshape(self._data.shape)
 
@@ -247,9 +271,9 @@ class Uniform(Variable):
             else:
                 data = np.array(data, copy=False)
                 if data.dtype in [np.float16, np.float32, np.float64]:
-                    self._data = data.astype(np.float32).view(TextureCube)
+                    self._set_owned_data(data.astype(np.float32).view(TextureCube), True)
                 else:
-                    self._data = data.view(TextureCube)
+                    self._set_owned_data(data.view(TextureCube), True)
 
         else:
             self._data[...] = np.array(data, copy=False).ravel()
@@ -330,7 +354,7 @@ class Attribute(Variable):
 
         # New vertex buffer
         if isinstance(data, (VertexBuffer, VertexArray)):
-            self._data = data
+            self._set_owned_data(data, False)
 
         # We already have a vertex buffer
         # HACK: disable reusing the same buffer for now: fails if the data has not the same shape
@@ -344,7 +368,7 @@ class Attribute(Variable):
                             isinstance(data[0], (float, int)))):
             # Let numpy convert the data for us
             _, _, dtype = gl_typeinfo[self._gtype]
-            self._data = np.array(data).astype(dtype)
+            self._set_owned_data(np.array(data).astype(dtype), False)
             self._generic = True
             self._need_update = True
             self._afunction = Attribute._afunctions[self._gtype]
@@ -358,7 +382,7 @@ class Attribute(Variable):
             data = data.ravel().view([(name, base, (count,))])
             # WARNING : transform data with the right type
             # data = np.array(data,copy=False)
-            self._data = data.view(VertexBuffer)
+            self._set_owned_data(data.view(VertexBuffer), True)
 
         self._generic = False
 

@@ -117,6 +117,17 @@ def test_actions_simple(actions):
 # Test actions and snippet
 #------------------------------------------------------------------------------
 
+def test_actions_remove_display_name(actions):
+    # Actions whose name is not a valid attribute name, as created by the views (e.g.
+    # "Change color scheme to blank"), and actions without callback, can be removed.
+    actions.add(lambda: None, name='Change color scheme: blank')
+    assert actions.change_color_scheme_blank
+    actions.add(name='No callback')
+    actions.remove_all()
+    assert not hasattr(actions, 'change_color_scheme_blank')
+    assert not actions._actions_dict
+
+
 def test_actions_gui_menu(qtbot, gui, actions):
     qtbot.addWidget(gui)
 

@@ -92,6 +92,9 @@ class Program(GLObject):
 
         self._uniforms = {}
         self._attributes = {}
+        # GPU objects (buffers, textures) replaced by new data, to delete when the GL context
+        # is current, i.e. at the next draw.
+        self._released = []
 
         # Build hooks, uniforms and attributes
         self._build_hooks()
@@ -367,6 +370,16 @@ class Program(GLObject):
 
     #     return self._uniforms.keys() + self._attributes.keys()
 
+    def _release(self, obj):
+        """Schedule the deletion of a GPU object that is no longer used by this program."""
+        self._released.append(obj)
+
+    def _delete_released(self):
+        """Delete the GPU objects that are no longer used. The GL context must be current."""
+        released, self._released = self._released, []
+        for obj in released:
+            obj.delete()
+
     def _activate(self):
         """Activate the program as part of current rendering state."""
 
@@ -594,6 +607,8 @@ class Program(GLObject):
         if isinstance(mode, str):
             mode = getattr(gl, 'GL_%s' % mode.upper())
 
+        if self._released:
+            self._delete_released()
         self.activate()
         attributes = self._attributes.values()
 

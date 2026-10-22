@@ -72,6 +72,40 @@ def test_manual_clustering_view_2(qtbot, gui):
     qtbot.wait(100)
 
 
+def test_manual_clustering_view_close_one(qtbot, gui):
+    # Closing a view must not affect the other views.
+    v1, v2 = MyView(), MyView()
+    v1.attach(gui)
+    v2.attach(gui)
+    gui.show()
+    qtbot.wait(50)
+
+    selected = []
+
+    def on_select(cluster_ids=None, **kwargs):
+        selected.append(list(cluster_ids))
+
+    v2.on_select = on_select
+
+    v1.dock.close()
+    qtbot.wait(50)
+    assert v1 not in gui.views
+    assert v2 in gui.views
+    assert not getattr(v2, '_closed', False)
+
+    # The remaining view is still updated when clusters are selected.
+    class Supervisor(object):
+        pass
+
+    emit('select', Supervisor(), [0, 1])
+    qtbot.wait(50)
+    assert selected == [[0, 1]]
+
+    v2.dock.close()
+    qtbot.wait(50)
+    assert v2 not in gui.views
+
+
 def test_unconnect_objects():
     import gc
     import weakref

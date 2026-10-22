@@ -160,6 +160,11 @@ def _alias(name):
     return alias
 
 
+def _action_attr_name(name):
+    """Name of the attribute of the Actions instance holding the callback of an action."""
+    return name.lower().replace(' ', '_').replace(':', '')
+
+
 def _expected_args(f):
     if isinstance(f, partial):
         argspec = inspect.getfullargspec(f.func)
@@ -403,7 +408,7 @@ class Actions(object):
 
         # Set the callback method.
         if callback:
-            setattr(self, name.lower().replace(' ', '_').replace(':', ''), callback)
+            setattr(self, _action_attr_name(name), callback)
 
     def separator(self, **kwargs):
         """Add a separator.
@@ -474,7 +479,11 @@ class Actions(object):
             pass
         qaction.deleteLater()
         del self._actions_dict[name]
-        delattr(self, name)
+        # NOTE: the callback attribute name is normalized (e.g. `Change color scheme to blank`
+        # => `change_color_scheme_to_blank`), and there is none for actions without callback.
+        attr = _action_attr_name(name)
+        if attr in self.__dict__:
+            delattr(self, attr)
 
     def remove_all(self):
         """Remove all actions."""

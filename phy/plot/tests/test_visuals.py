@@ -44,6 +44,47 @@ def test_scatter_empty(qtbot, canvas):
     _test_visual(qtbot, canvas, ScatterVisual(), x=np.zeros(0), y=np.zeros(0))
 
 
+def test_scatter_gpu_buffers_released(qtbot, canvas):
+    """Updating the data of a visual must delete the GPU buffers of the previous data."""
+    v = ScatterVisual()
+    canvas.add_visual(v)
+    v.set_data(x=.2 * np.random.randn(100), y=.2 * np.random.randn(100))
+    canvas.show()
+    qtbot.waitForWindowShown(canvas)
+    canvas.update()
+    qtbot.wait(50)
+
+    attr = v.program._attributes['a_position']
+    old = attr.data
+    assert old._handle > -1  # the buffer has been created on the GPU
+
+    v.set_data(x=.2 * np.random.randn(50), y=.2 * np.random.randn(50))
+    assert any(o is old for o in v.program._released)
+    canvas.update()
+    qtbot.wait(50)
+
+    # The old buffer has been deleted at the next draw, the new one has been created.
+    assert v.program._released == []
+    assert old._handle == -1
+    assert attr.data is not old
+    assert attr.data._handle > -1
+
+    # A buffer passed explicitly is not owned by the program and is never deleted by it.
+    from ..gloo import VertexBuffer
+    def _buffer():
+        return np.zeros(10, dtype=[('a_position', np.float32, 3)]).view(VertexBuffer)
+
+    pos = _buffer()
+    pos._handle = 1  # pretend it has been created on the GPU
+    v.program['a_position'] = pos  # releases the owned buffer
+    v.program['a_position'] = _buffer()
+    assert all(o is not pos for o in v.program._released)
+    v.program._released = []
+    pos._handle = -1
+    v.close()
+    canvas.close()
+
+
 def test_scatter_markers(qtbot, canvas_pz):
 
     n = 100

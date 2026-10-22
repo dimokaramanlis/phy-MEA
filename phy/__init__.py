@@ -16,6 +16,9 @@ import sys
 from io import StringIO
 
 from phylib.utils import Bunch
+from .utils._bunch import patch_bunch
+# NOTE: must be done before any Bunch is created.
+patch_bunch()
 from phylib.utils._misc import _git_version
 from phylib.utils.event import connect, unconnect, emit
 from .utils.config import load_master_config
