@@ -13,7 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
-from phylib import _add_log_file
+from phy.utils._log import _add_log_file
 from phylib.io.model import TemplateModel, load_model
 from phylib.utils import Bunch, connect
 

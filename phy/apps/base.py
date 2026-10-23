@@ -18,7 +18,7 @@ import dask.array as da
 import numpy as np
 from scipy.signal import butter, lfilter
 
-from phylib import _add_log_file
+from phy.utils._log import _add_log_file
 from phylib.io.array import Selector, _flatten
 from phylib.stats import correlograms, firing_rate
 from phylib.utils import Bunch, emit, connect, unconnect
