@@ -776,9 +776,11 @@ class Supervisor(object):
         """Save the new cluster id on disk, knowing that cluster ids are unique for
         easier cache consistency."""
         new_cluster_id = self.clustering.new_cluster_id()
-        if self.context:
+        # NOTE: the id only changes after merges/splits, not after metadata changes.
+        if self.context and new_cluster_id != getattr(self, '_saved_new_cluster_id', None):
             logger.log(5, "Save the new cluster id: %d.", new_cluster_id)
             self.context.save('new_cluster_id', dict(new_cluster_id=new_cluster_id))
+            self._saved_new_cluster_id = new_cluster_id
 
     def _save_gui_state(self, gui):
         """Save the GUI state with the cluster view and similarity view."""
@@ -1226,7 +1228,9 @@ class Supervisor(object):
         # List of tuples (field_name, dictionary).
         labels = [
             (field, self.get_labels(field)) for field in self.cluster_meta.fields
-            if field not in ('next_cluster')]
+            # NOTE: a tuple, not a string: `in 'next_cluster'` excluded every label whose
+            # name is a substring of it (e.g. `cluster`), which was then never saved.
+            if field not in ('next_cluster',)]
         emit('save_clustering', self, spike_clusters, groups, *labels)
         # Cache the spikes_per_cluster array.
         self._save_spikes_per_cluster()
