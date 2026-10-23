@@ -10,7 +10,7 @@ import numpy as np
 
 import logging
 
-from ._history import History
+from ._history import History, UNDO_HISTORY_SIZE
 from phylib.utils import Bunch, _as_list, _is_list, emit
 
 logger = logging.getLogger(__name__)
@@ -142,7 +142,8 @@ class ClusterMeta(object):
         # base snapshot. Replaying erased every value set outside of the undo stack (labels
         # loaded from cluster_*.tsv files, metadata inherited by new clusters after a
         # merge/split...), and became slower as the history grew.
-        self._undo_stack = History((None, None, None, None, None, None))
+        self._undo_stack = History(
+            (None, None, None, None, None, None), max_size=UNDO_HISTORY_SIZE)
 
     @property
     def fields(self):

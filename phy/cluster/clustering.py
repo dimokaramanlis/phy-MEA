@@ -13,7 +13,7 @@ import numpy as np
 from phylib.utils._types import _as_array, _is_array_like
 from phylib.io.array import _unique, _spikes_in_clusters, _spikes_per_cluster
 from ._utils import UpdateInfo
-from ._history import History
+from ._history import History, UNDO_HISTORY_SIZE
 from phylib.utils.event import emit
 
 logger = logging.getLogger(__name__)
@@ -194,7 +194,8 @@ class Clustering(object):
         super(Clustering, self).__init__()
         # The stack contains (spike_ids, new_spike_clusters, old_spike_clusters, undo_state)
         # tuples. Undoing an action simply restores the old assignment of the affected spikes.
-        self._undo_stack = History(base_item=(None, None, None, None))
+        self._undo_stack = History(
+            base_item=(None, None, None, None), max_size=UNDO_HISTORY_SIZE)
         # Spike -> cluster mapping.
         self._spike_clusters = _as_array(spike_clusters)
         self._spikes_per_cluster = {}
@@ -212,6 +213,9 @@ class Clustering(object):
         """Reset the clustering to the original clustering.
 
         All changes are lost.
+
+        NOTE: only the actions still in the undo stack (the last `UNDO_HISTORY_SIZE` ones) are
+        reverted.
 
         """
         # NOTE: we undo all actions instead of keeping a full copy of the original

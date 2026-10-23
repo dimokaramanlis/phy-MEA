@@ -7,14 +7,34 @@
 #------------------------------------------------------------------------------
 
 
+# Maximum number of actions that can be undone.
+# NOTE: undo items hold per-spike arrays (spike ids and their previous clusters). With an
+# unbounded stack, memory grows with every merge/split during a session (several GB on
+# large datasets).
+UNDO_HISTORY_SIZE = 10
+
+
 #------------------------------------------------------------------------------
 # History class
 #------------------------------------------------------------------------------
 
 class History(object):
-    """Implement a history of actions with an undo stack."""
+    """Implement a history of actions with an undo stack.
 
-    def __init__(self, base_item=None):
+    Parameters
+    ----------
+
+    base_item : object
+        The item at the bottom of the stack, that is never undone.
+    max_size : int or None
+        Maximum number of items kept in addition to the base item. The oldest items are
+        dropped beyond that. Unbounded if None.
+
+    """
+
+    def __init__(self, base_item=None, max_size=None):
+        assert max_size is None or max_size >= 1
+        self.max_size = max_size
         self.clear(base_item)
 
     def clear(self, base_item=None):
@@ -89,6 +109,12 @@ class History(object):
         self._history.append(item)
         # Increment the index.
         self._index += 1
+        # Drop the oldest items (but keep the base item) if the history is too long.
+        if self.max_size is not None:
+            n_extra = len(self._history) - 1 - self.max_size
+            if n_extra > 0:
+                del self._history[1:1 + n_extra]
+                self._index -= n_extra
         self._check_index()
         # Check that the current element is what was provided to the function.
         assert id(self.current_item) == id(item)
@@ -129,8 +155,8 @@ class History(object):
 class GlobalHistory(History):
     """Merge several controllers with different undo stacks."""
 
-    def __init__(self, process_ups=None):
-        super(GlobalHistory, self).__init__(())
+    def __init__(self, process_ups=None, max_size=None):
+        super(GlobalHistory, self).__init__((), max_size=max_size)
         self.process_ups = process_ups
 
     def action(self, *controllers):

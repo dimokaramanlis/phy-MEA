@@ -520,7 +520,10 @@ def test_clustering_undo_redo_random():
             clustering.redo()
             ae(clustering.spike_clusters, states[-1])
 
-    for state in states[-2::-1]:
+    # Only the last UNDO_HISTORY_SIZE actions can be undone.
+    from .._history import UNDO_HISTORY_SIZE
+    k = UNDO_HISTORY_SIZE
+    for state in states[-2:-k - 2:-1]:
         clustering.undo()
         ae(clustering.spike_clusters, state)
         spc = clustering.spikes_per_cluster
@@ -529,11 +532,40 @@ def test_clustering_undo_redo_random():
             ae(spc[c], np.nonzero(state == c)[0])
     # Nothing more to undo.
     assert clustering.undo() is None
-    ae(clustering.spike_clusters, spike_clusters)
+    ae(clustering.spike_clusters, states[-k - 1])
 
-    for state in states[1:]:
+    for state in states[-k:]:
         clustering.redo()
         ae(clustering.spike_clusters, state)
 
+    # Reset reverts the actions still in the undo stack.
     clustering.reset()
-    ae(clustering.spike_clusters, spike_clusters)
+    ae(clustering.spike_clusters, states[-k - 1])
+
+
+def test_clustering_undo_limit():
+    from .._history import UNDO_HISTORY_SIZE
+    n = UNDO_HISTORY_SIZE + 5
+    spike_clusters = np.arange(2 * n + 2)
+    clustering = Clustering(spike_clusters)
+
+    # Merge pairs of clusters, more times than the undo limit.
+    for i in range(n):
+        clustering.merge([2 * i, 2 * i + 1])
+    assert len(clustering._undo_stack) == UNDO_HISTORY_SIZE + 1
+    after = clustering.spike_clusters.copy()
+
+    # Only the last UNDO_HISTORY_SIZE actions can be undone.
+    for _ in range(UNDO_HISTORY_SIZE):
+        assert clustering.undo() is not None
+    assert clustering.undo() is None
+    expected = after.copy()
+    for i in range(n - UNDO_HISTORY_SIZE, n):
+        expected[[2 * i, 2 * i + 1]] = [2 * i, 2 * i + 1]
+    ae(clustering.spike_clusters, expected)
+
+    # Redo everything.
+    for _ in range(UNDO_HISTORY_SIZE):
+        assert clustering.redo() is not None
+    assert clustering.redo() is None
+    ae(clustering.spike_clusters, after)

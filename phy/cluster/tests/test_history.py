@@ -142,3 +142,25 @@ def test_global_history():
     assert gh.redo() == 'h1 first'
     assert gh.redo() == 'h2 first'
     assert gh.redo() == 'h1 second' + 'h2 second'
+
+
+def test_history_max_size():
+    history = History(base_item='base', max_size=3)
+    for i in range(10):
+        history.add(i)
+    # Only the base item and the last 3 items are kept.
+    assert list(history._history) == ['base', 7, 8, 9]
+    assert history.current_item == 9
+
+    # Only 3 undos are possible.
+    assert [history.back() for _ in range(4)] == [9, 8, 7, None]
+    assert history.current_item == 'base'
+
+    # Redo still works after undoing.
+    assert history.forward() == 7
+    # Adding an item truncates the redo items, then the size is bounded again.
+    history.add(10)
+    history.add(11)
+    history.add(12)
+    assert list(history._history) == ['base', 10, 11, 12]
+    assert history.current_position == 3

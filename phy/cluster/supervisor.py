@@ -13,7 +13,7 @@ import logging
 
 import numpy as np
 
-from ._history import GlobalHistory
+from ._history import GlobalHistory, UNDO_HISTORY_SIZE
 from ._utils import create_cluster_meta, UpdateInfo, _PER_SPIKE_FIELDS
 from .clustering import Clustering
 
@@ -704,7 +704,8 @@ class Supervisor(object):
                 self.cluster_meta.set(label, [cl], v, add_to_stack=False)
 
         # Create the GlobalHistory instance.
-        self._global_history = GlobalHistory(process_ups=_process_ups)
+        self._global_history = GlobalHistory(
+            process_ups=_process_ups, max_size=UNDO_HISTORY_SIZE)
 
         # Create The Action Creator instance.
         self.action_creator = ActionCreator(self)
