@@ -200,6 +200,8 @@ class Clustering(object):
         self._spike_clusters = _as_array(spike_clusters)
         self._spikes_per_cluster = {}
         self._n_spikes = len(self._spike_clusters)
+        # Whether spikes_per_cluster had to be computed instead of using the one passed.
+        self.spikes_per_cluster_recomputed = False
         self._spike_ids = np.arange(self._n_spikes).astype(np.int64)
         # We can pass the precomputed spikes_per_cluster dictionary for
         # performance reasons.
@@ -319,6 +321,7 @@ class Clustering(object):
             logger.debug("Recompute spikes_per_cluster manually: this might take a while.")
             sc = self._spike_clusters
             self._spikes_per_cluster = _spikes_per_cluster(sc)
+            self.spikes_per_cluster_recomputed = True
 
     def _do_assign(self, spike_ids, new_spike_clusters):
         """Make spike-cluster assignments after the spike selection has

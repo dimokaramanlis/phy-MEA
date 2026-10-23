@@ -49,8 +49,15 @@ logger = logging.getLogger(__name__)
 
 def _concatenate_parents_attributes(cls, name):
     """Return the concatenation of class attributes of a given name among all parents of a
-    class."""
-    return _flatten([getattr(_, name, ()) for _ in inspect.getmro(cls)])
+    class, without duplicates."""
+    # NOTE: getattr() returns the attribute inherited from a parent for classes that do not
+    # define it: the same items appeared several times. Methods were then cached twice (e.g.
+    # raw waveforms were hashed and written twice to the disk cache at every selection).
+    out = []
+    for item in _flatten([getattr(_, name, ()) for _ in inspect.getmro(cls)]):
+        if item not in out:
+            out.append(item)
+    return out
 
 
 class Selection(Bunch):
@@ -145,7 +152,7 @@ class WaveformMixin(object):
 
     _memcached = (
         # 'get_mean_spike_raw_amplitudes',
-        '_get_mean_waveforms',
+        '_get_mean_waveforms_cached',
     )
 
     def get_spike_raw_amplitudes(self, spike_ids, channel_id=None, **kwargs):
@@ -214,13 +221,26 @@ class WaveformMixin(object):
             cluster_id, self.n_spikes_waveforms, self.batch_size_waveforms,
             current_filter=self.raw_data_filter.current)
 
-    def _get_mean_waveforms(self, cluster_id, current_filter=None):
-        """Get the mean waveform of a cluster on its best channels."""
-        b = self._get_waveforms(cluster_id)
+    def _get_mean_waveforms_cached(
+            self, cluster_id, current_filter=None, n_spikes_waveforms=None,
+            batch_size_waveforms=None):
+        # NOTE: the memcache key is made of the positional arguments only: the raw data filter
+        # and the number of spikes must be passed positionally, otherwise the mean waveforms
+        # computed with another filter or number of spikes are returned.
+        b = self._get_waveforms_with_n_spikes(
+            cluster_id, n_spikes_waveforms, batch_size_waveforms, current_filter=current_filter)
+        # NOTE: copy the Bunch, as _get_waveforms_with_n_spikes() is cached as well.
+        b = Bunch(b)
         if b.data is not None:
             b.data = b.data.mean(axis=0)[np.newaxis, ...]
         b['alpha'] = 1.
         return b
+
+    def _get_mean_waveforms(self, cluster_id):
+        """Get the mean waveform of a cluster on its best channels."""
+        return self._get_mean_waveforms_cached(
+            cluster_id, self.raw_data_filter.current, self.n_spikes_waveforms,
+            self.batch_size_waveforms)
 
     def _set_view_creator(self):
         super(WaveformMixin, self)._set_view_creator()

@@ -690,8 +690,11 @@ class Supervisor(object):
         self.clustering = Clustering(
             spike_clusters, spikes_per_cluster=spc, new_cluster_id=new_cluster_id)
 
-        # Cache the spikes_per_cluster array.
-        self._save_spikes_per_cluster()
+        # Cache the spikes_per_cluster array, unless the cached one was valid.
+        # NOTE: this file is large (~8 bytes per spike), rewriting it unchanged at every
+        # launch took several seconds on large datasets.
+        if self.clustering.spikes_per_cluster_recomputed:
+            self._save_spikes_per_cluster()
 
         # Create the ClusterMeta instance.
         self.cluster_meta = create_cluster_meta(cluster_groups or {})
